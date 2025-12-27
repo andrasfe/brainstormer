@@ -22,6 +22,7 @@ from ..middleware.lifecycle import (
     AgentSpawnMiddleware,
     MiddlewareContext,
     PlanCreationMiddleware,
+    QualityGateMiddleware,
     ResearchWriteMiddleware,
     SearchMiddleware,
 )
@@ -57,7 +58,7 @@ You are NOT a simple summarizer. You are a critical researcher who:
 
 ### PHASE 2: Deep Dive & Evidence Gathering
 1. For each promising direction, conduct 5+ additional targeted searches
-2. Look for: academic papers, patents, industry reports, technical blogs, case studies
+2. Look for: academic papers, industry reports, technical blogs, case studies
 3. Cross-reference claims - find multiple sources for important facts
 4. Identify gaps in existing knowledge
 5. Write to `phase2_deep_dive.md`
@@ -90,7 +91,7 @@ You MUST use `internet_search` extensively:
 - Minimum 15-20 searches per research session
 - Use varied query formulations (technical terms, layman terms, related concepts)
 - Search for both supporting AND contradicting evidence
-- Include searches for: recent developments, academic research, patents, industry trends
+- Include searches for: recent developments, academic research, industry trends
 
 Example search patterns for a topic:
 1. "[topic] overview fundamentals"
@@ -98,7 +99,7 @@ Example search patterns for a topic:
 3. "[topic] challenges problems limitations"
 4. "[topic] vs alternatives comparison"
 5. "[topic] real world applications case studies"
-6. "[topic] patents innovations"
+6. "[topic] innovations breakthroughs"
 7. "[topic] criticism failures"
 8. "why [topic] might not work"
 
@@ -283,12 +284,13 @@ Write your findings to markdown files with:
             memory=self.memory_manager,
         )
 
-        # Initialize middleware (stored for potential future use in hook integration)
+        # Initialize middleware
         _ = PlanCreationMiddleware(middleware_context)
         _ = AgentSpawnMiddleware(middleware_context)
         _ = ResearchWriteMiddleware(middleware_context)
         _ = SearchMiddleware(middleware_context)
         _ = AgentCompletionMiddleware(middleware_context)
+        quality_gate = QualityGateMiddleware(middleware_context)
 
         # Get the session output directory
         session_output_dir = self.persistence.get_session_dir(session_id)
@@ -297,13 +299,19 @@ Write your findings to markdown files with:
         # Create tools (using Any for heterogeneous callable types)
         tools: list[Any] = []
 
-        # Add file tools for writing research output
-        file_tools = create_file_tools(str(session_output_dir))
+        # Add file tools for writing research output (with quality tracking)
+        file_tools = create_file_tools(
+            str(session_output_dir),
+            on_write=quality_gate.record_write,
+        )
         tools.extend(file_tools.values())
 
-        # Add search tool
+        # Add search tool (with quality tracking)
         if self.settings.tavily_api_key:
-            tools.append(create_search_tool(self.settings.tavily_api_key))
+            tools.append(create_search_tool(
+                self.settings.tavily_api_key,
+                on_search=quality_gate.record_search,
+            ))
 
         # Add memory tools
         memory_tools = create_memory_tools(self.memory_manager)
@@ -387,7 +395,7 @@ Conduct RIGOROUS, MULTI-PHASE research on this problem. You must:
 ### Phase 2: Deep Investigation (Required)
 - Based on Phase 1, identify the most promising angles
 - Conduct 10+ additional targeted searches
-- Look for patents, academic papers, case studies, expert opinions
+- Look for academic papers, case studies, expert opinions
 - Write detailed findings to `phase2_deep_dive.md`
 
 ### Phase 3: Critical Challenge (Required)
@@ -420,10 +428,30 @@ Begin with Phase 1 now. Start by writing your RESEARCH_PLAN.md with research que
             config=config,
         )
 
+        # Debug: Log what the agent returned
+        messages = result.get("messages", [])
+        logger.info(f"Agent returned {len(messages)} messages")
+        for i, msg in enumerate(messages[-5:]):  # Last 5 messages
+            msg_type = type(msg).__name__
+            content = getattr(msg, 'content', str(msg))[:500] if hasattr(msg, 'content') else str(msg)[:500]
+            tool_calls = getattr(msg, 'tool_calls', None)
+            logger.info(f"Message {i}: [{msg_type}] tool_calls={tool_calls}")
+            logger.info(f"  Content: {content}...")
+
         # Execute post-session hooks
         await self.hook_manager.execute_post(
             "session_end",
             {"session_id": session_id, "result": result},
+        )
+
+        # Generate and save quality report
+        quality_report = quality_gate.get_quality_report()
+        import json
+        report_path = session_output_dir / "QUALITY_REPORT.json"
+        report_path.write_text(json.dumps(quality_report, indent=2))
+        logger.info(
+            f"Quality Report - Score: {quality_report['score']}/100 "
+            f"(Grade: {quality_report['grade']})"
         )
 
         # Update session status
@@ -433,6 +461,8 @@ Begin with Phase 1 now. Start by writing your RESEARCH_PLAN.md with research que
             metadata={
                 "end_time": datetime.now(tz=UTC).isoformat(),
                 "message_count": len(result.get("messages", [])),
+                "quality_score": quality_report["score"],
+                "quality_grade": quality_report["grade"],
             },
         )
 

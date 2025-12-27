@@ -12,8 +12,16 @@ from ..utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-def create_search_tool(api_key: str | None = None) -> Callable[..., dict[str, Any]]:
-    """Create a Tavily web search tool."""
+def create_search_tool(
+    api_key: str | None = None,
+    on_search: Callable[[str], None] | None = None,
+) -> Callable[..., dict[str, Any]]:
+    """Create a Tavily web search tool.
+
+    Args:
+        api_key: Tavily API key
+        on_search: Optional callback called with query string on each search
+    """
     key = api_key or os.environ.get("TAVILY_API_KEY")
     if not key:
         raise ValueError("TAVILY_API_KEY is required for web search")
@@ -41,6 +49,10 @@ def create_search_tool(api_key: str | None = None) -> Callable[..., dict[str, An
             Search results with titles, URLs, and content snippets
         """
         try:
+            # Notify callback if provided
+            if on_search:
+                on_search(query)
+
             results: dict[str, Any] = client.search(
                 query=query,
                 max_results=min(max_results, 10),
@@ -141,8 +153,16 @@ def create_file_context_tool(input_files: list[dict[str, Any]]) -> Callable[...,
     return get_input_context
 
 
-def create_file_tools(output_dir: str) -> dict[str, Callable[..., Any]]:
-    """Create tools for reading and writing files in the output directory."""
+def create_file_tools(
+    output_dir: str,
+    on_write: Callable[[str, str], None] | None = None,
+) -> dict[str, Callable[..., Any]]:
+    """Create tools for reading and writing files in the output directory.
+
+    Args:
+        output_dir: Base directory for file operations
+        on_write: Optional callback called with (file_path, content) on each write
+    """
     from pathlib import Path
 
     base_dir = Path(output_dir)
@@ -172,6 +192,11 @@ def create_file_tools(output_dir: str) -> dict[str, Callable[..., Any]]:
             # Write the file
             target.write_text(content, encoding="utf-8")
             logger.info(f"Wrote file: {target}")
+
+            # Notify callback if provided
+            if on_write:
+                on_write(file_path, content)
+
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.error(f"Failed to write file {file_path}: {e}")
