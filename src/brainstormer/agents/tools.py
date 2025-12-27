@@ -139,3 +139,99 @@ def create_file_context_tool(input_files: list[dict[str, Any]]) -> Callable[...,
         ]
 
     return get_input_context
+
+
+def create_file_tools(output_dir: str) -> dict[str, Callable[..., Any]]:
+    """Create tools for reading and writing files in the output directory."""
+    from pathlib import Path
+
+    base_dir = Path(output_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_file(file_path: str, content: str) -> str:
+        """
+        Write content to a file in the research output directory.
+
+        Args:
+            file_path: Relative path for the file (e.g., 'RESEARCH_PLAN.md' or 'findings/topic1.md')
+            content: The content to write to the file
+
+        Returns:
+            Confirmation message with the full path
+        """
+        try:
+            # Ensure path is relative and within output directory
+            target = base_dir / file_path
+            # Prevent path traversal
+            if not str(target.resolve()).startswith(str(base_dir.resolve())):
+                return f"Error: Cannot write outside output directory"
+
+            # Create parent directories if needed
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write the file
+            target.write_text(content, encoding="utf-8")
+            logger.info(f"Wrote file: {target}")
+            return f"Successfully wrote {len(content)} characters to {file_path}"
+        except Exception as e:
+            logger.error(f"Failed to write file {file_path}: {e}")
+            return f"Error writing file: {e}"
+
+    def read_file(file_path: str) -> str:
+        """
+        Read content from a file in the research output directory.
+
+        Args:
+            file_path: Relative path for the file to read
+
+        Returns:
+            The file content or an error message
+        """
+        try:
+            target = base_dir / file_path
+            # Prevent path traversal
+            if not str(target.resolve()).startswith(str(base_dir.resolve())):
+                return f"Error: Cannot read outside output directory"
+
+            if not target.exists():
+                return f"File not found: {file_path}"
+
+            content = target.read_text(encoding="utf-8")
+            logger.debug(f"Read file: {target} ({len(content)} chars)")
+            return content
+        except Exception as e:
+            logger.error(f"Failed to read file {file_path}: {e}")
+            return f"Error reading file: {e}"
+
+    def list_files(directory: str = "") -> list[str]:
+        """
+        List files in the research output directory.
+
+        Args:
+            directory: Subdirectory to list (empty for root)
+
+        Returns:
+            List of file paths relative to the output directory
+        """
+        try:
+            target = base_dir / directory
+            if not str(target.resolve()).startswith(str(base_dir.resolve())):
+                return ["Error: Cannot list outside output directory"]
+
+            if not target.exists():
+                return []
+
+            files = []
+            for item in target.rglob("*"):
+                if item.is_file():
+                    files.append(str(item.relative_to(base_dir)))
+            return sorted(files)
+        except Exception as e:
+            logger.error(f"Failed to list files: {e}")
+            return [f"Error: {e}"]
+
+    return {
+        "write_file": write_file,
+        "read_file": read_file,
+        "list_files": list_files,
+    }

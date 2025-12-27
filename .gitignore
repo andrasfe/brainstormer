@@ -146,3 +146,4 @@ research/
 !subagents.jsonl.example
 .venv/
 .env
+research/*

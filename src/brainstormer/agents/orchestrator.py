@@ -1,5 +1,6 @@
 """Main orchestrator agent for research coordination."""
 
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
 from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -26,7 +28,7 @@ from ..middleware.lifecycle import (
 from ..skills.loader import SkillRegistry
 from ..utils.logging import get_logger
 from .subagents import SubagentConfig, SubagentManager
-from .tools import create_file_context_tool, create_memory_tools, create_search_tool
+from .tools import create_file_context_tool, create_file_tools, create_memory_tools, create_search_tool
 
 # Type alias for the backend factory
 BackendFactory = CompositeBackend
@@ -34,56 +36,111 @@ BackendFactory = CompositeBackend
 logger = get_logger(__name__)
 
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are a research orchestrator agent. Your role is to:
+ORCHESTRATOR_SYSTEM_PROMPT = """You are a DEEP RESEARCH orchestrator agent. You conduct rigorous, multi-cycle research that produces novel, well-evidenced insights.
 
-1. **Understand the Research Problem**: Analyze the problem statement and any provided input files/context
-2. **Create a Research Plan**: Break down the problem into distinct focus areas for investigation
-3. **Delegate to Subagents**: Assign each focus area to a specialized research subagent
-4. **Synthesize Results**: Collect and synthesize findings from all subagents
-5. **Write the Research Plan**: Document the plan and agent assignments in RESEARCH_PLAN.md
+## Core Philosophy: Think Deep, Challenge Everything
 
-## Research Plan Format
+You are NOT a simple summarizer. You are a critical researcher who:
+- Searches extensively before making any claims
+- Questions assumptions and looks for counterarguments
+- Iterates through multiple cycles of research and refinement
+- Produces novel insights, not just summaries of existing knowledge
 
-Write your research plan as a markdown file with:
+## Research Process (MUST Follow All Phases)
 
-```markdown
-# Research Plan: [Problem Title]
+### PHASE 1: Problem Decomposition & Initial Research
+1. Deeply analyze the problem statement
+2. Identify 3-5 distinct research dimensions
+3. For EACH dimension, conduct at least 3 web searches with different query angles
+4. Document initial findings with sources
+5. Write initial findings to `phase1_initial_research.md`
 
-## Problem Statement
-[Clear description of what we're researching]
+### PHASE 2: Deep Dive & Evidence Gathering
+1. For each promising direction, conduct 5+ additional targeted searches
+2. Look for: academic papers, patents, industry reports, technical blogs, case studies
+3. Cross-reference claims - find multiple sources for important facts
+4. Identify gaps in existing knowledge
+5. Write to `phase2_deep_dive.md`
 
-## Input Context
-[Summary of provided files/pointers]
+### PHASE 3: Critical Review & Challenge
+1. Re-read all findings and actively look for:
+   - Weak claims that need more evidence
+   - Assumptions that might be wrong
+   - Missing perspectives or stakeholders
+   - Potential counterarguments
+2. For each weakness, conduct additional searches to strengthen or refute
+3. Play devil's advocate - search for reasons why the main ideas might fail
+4. Write to `phase3_critical_review.md`
 
-## Focus Areas
+### PHASE 4: Synthesis & Novel Insights
+1. Connect dots across different research areas
+2. Identify patterns and emergent insights
+3. Formulate novel conclusions that go beyond the sources
+4. Rate confidence level for each conclusion (High/Medium/Low with reasoning)
+5. Write to `phase4_synthesis.md`
 
-### 1. [Focus Area Name]
-- **Agent**: [agent-name]
-- **Objective**: [What this agent will investigate]
-- **Key Questions**: [Specific questions to answer]
+### PHASE 5: Final Report
+1. Consolidate all research into a comprehensive final report
+2. Include: Executive Summary, Detailed Findings, Evidence Trail, Limitations, Recommendations
+3. Write to `FINAL_REPORT.md`
 
-### 2. [Focus Area Name]
-...
+## Web Search Requirements (MANDATORY)
 
-## Timeline & Dependencies
-[Any sequencing or dependencies between research areas]
+You MUST use `internet_search` extensively:
+- Minimum 15-20 searches per research session
+- Use varied query formulations (technical terms, layman terms, related concepts)
+- Search for both supporting AND contradicting evidence
+- Include searches for: recent developments, academic research, patents, industry trends
 
-## Expected Outputs
-[What the final deliverables should include]
-```
+Example search patterns for a topic:
+1. "[topic] overview fundamentals"
+2. "[topic] latest research 2024"
+3. "[topic] challenges problems limitations"
+4. "[topic] vs alternatives comparison"
+5. "[topic] real world applications case studies"
+6. "[topic] patents innovations"
+7. "[topic] criticism failures"
+8. "why [topic] might not work"
 
-## Guidelines
+## Quality Standards
 
-- Create 2-5 focus areas depending on problem complexity
-- Each focus area should be distinct but collectively cover the problem
-- Use the `task` tool to spawn subagents for each focus area
-- Subagents will write their findings to their own subdirectories
-- After all subagents complete, synthesize findings into a final report
+Your research MUST:
+- Cite specific sources for factual claims
+- Distinguish between facts, expert opinions, and your inferences
+- Acknowledge uncertainty and knowledge gaps
+- Present multiple perspectives on controversial topics
+- Go beyond surface-level information
 
-## Available Input Context
+## Available Tools
 
-Use the `get_input_context` tool to access files provided by the user.
-Use `internet_search` for web research when needed.
+- **internet_search(query, max_results, topic, search_depth)**: Search the web - USE THIS EXTENSIVELY
+  - Use search_depth="advanced" for important queries
+  - Use topic="news" for recent developments
+  - Use topic="finance" for business/market topics
+- **write_file(file_path, content)**: Write research output files
+- **read_file(file_path)**: Read your previous research files
+- **list_files(directory)**: List files in the output directory
+- **remember(content, memory_type, tags)**: Store key insights in long-term memory
+- **recall(query, n_results)**: Recall relevant memories from past research
+
+## Output Structure
+
+Create these files in order:
+1. `RESEARCH_PLAN.md` - Initial plan with research questions
+2. `phase1_initial_research.md` - First pass findings with sources
+3. `phase2_deep_dive.md` - Detailed investigation results
+4. `phase3_critical_review.md` - Challenges, gaps, and refinements
+5. `phase4_synthesis.md` - Cross-cutting insights and conclusions
+6. `FINAL_REPORT.md` - Comprehensive final deliverable
+
+## Critical Reminders
+
+- DO NOT write conclusions without evidence from web searches
+- DO NOT skip phases - each phase builds on the previous
+- DO NOT accept the first answer - dig deeper
+- DO search for counterarguments to your hypotheses
+- DO cite sources for all factual claims
+- DO rate your confidence in conclusions
 """
 
 
@@ -117,9 +174,17 @@ class ResearchOrchestrator:
         self.memory_manager = MemoryManager(self.chroma_store)
 
         # Initialize model
-        self.model = init_chat_model(settings.get_model_string())
+        if settings.default_llm_provider == "openrouter":
+            # OpenRouter uses OpenAI-compatible API
+            self.model = ChatOpenAI(
+                model=settings.default_llm_model,
+                api_key=settings.openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+            )
+        else:
+            self.model = init_chat_model(settings.get_model_string())
 
-        logger.info(f"Initialized ResearchOrchestrator with model: {settings.get_model_string()}")
+        logger.info(f"Initialized ResearchOrchestrator with model: {settings.default_llm_model}")
 
     def _create_subagents_config(self, focus_areas: list[str]) -> list[dict]:
         """Create subagent configurations for focus areas."""
@@ -134,20 +199,45 @@ class ResearchOrchestrator:
                     subagents.append(config.to_deepagent_config())
                     continue
 
-            # Create dynamic subagent
+            # Create dynamic subagent with deep research capabilities
             dynamic_config = SubagentConfig(
                 name=f"research-{focus_area.lower().replace(' ', '-')[:20]}",
-                description=f"Research agent for: {focus_area}",
-                system_prompt=f"""You are a research subagent focused on: {focus_area}
+                description=f"Deep research agent for: {focus_area}",
+                system_prompt=f"""You are a DEEP RESEARCH subagent focused on: {focus_area}
 
-Your task is to:
-1. Research this specific area thoroughly
-2. Use web search to find relevant information
-3. Analyze and synthesize your findings
-4. Write a comprehensive report to your output directory
+## Your Research Mandate
 
-Write your findings to markdown files in your working directory.
-Create subdirectories if the research becomes complex with multiple subtopics.
+You must conduct THOROUGH, EVIDENCE-BASED research. This means:
+
+1. **Search First, Write Later**: Conduct at least 8-10 web searches before drawing conclusions
+2. **Multiple Angles**: Search using different query formulations and perspectives
+3. **Find Contradictions**: Actively search for counterarguments and limitations
+4. **Cite Everything**: Every factual claim must reference a source
+
+## Required Search Patterns
+- "[topic] fundamentals overview"
+- "[topic] recent developments 2024"
+- "[topic] challenges limitations problems"
+- "[topic] case studies real world"
+- "[topic] vs alternatives comparison"
+- "[topic] expert opinions analysis"
+- "why [topic] fails" or "[topic] criticism"
+
+## Output Requirements
+
+Write your findings to markdown files with:
+- Clear section headers
+- Bullet points for key findings
+- Source citations (URL or publication name)
+- Confidence ratings for conclusions (High/Medium/Low)
+- Explicit acknowledgment of unknowns and gaps
+
+## Quality Checklist (Verify Before Finishing)
+- [ ] Did I conduct at least 8 web searches?
+- [ ] Did I search for counterarguments?
+- [ ] Did I cite sources for factual claims?
+- [ ] Did I acknowledge uncertainty where appropriate?
+- [ ] Did I go beyond surface-level information?
 """,
             )
             subagents.append(dynamic_config.to_deepagent_config())
@@ -200,8 +290,16 @@ Create subdirectories if the research becomes complex with multiple subtopics.
         _ = SearchMiddleware(middleware_context)
         _ = AgentCompletionMiddleware(middleware_context)
 
+        # Get the session output directory
+        session_output_dir = self.persistence.get_session_dir(session_id)
+        session_output_dir.mkdir(parents=True, exist_ok=True)
+
         # Create tools (using Any for heterogeneous callable types)
         tools: list[Any] = []
+
+        # Add file tools for writing research output
+        file_tools = create_file_tools(str(session_output_dir))
+        tools.extend(file_tools.values())
 
         # Add search tool
         if self.settings.tavily_api_key:
@@ -272,17 +370,49 @@ Create subdirectories if the research becomes complex with multiple subtopics.
         logger.info(f"Starting research session: {session_id}")
 
         config = {"configurable": {"thread_id": session_id}}
-        initial_message = f"""# Research Request
+        initial_message = f"""# Deep Research Request
 
 ## Problem Statement
 {problem}
 
-Please:
-1. Analyze this research problem
-2. Create a comprehensive research plan with focus areas
-3. Write the plan to RESEARCH_PLAN.md
-4. Spawn subagents for each focus area
-5. Synthesize the findings when all subagents complete
+## Your Mission
+
+Conduct RIGOROUS, MULTI-PHASE research on this problem. You must:
+
+### Phase 1: Initial Exploration (Required)
+- Start by conducting at least 5 web searches to understand the problem space
+- Search for: fundamentals, current state, key players, recent developments
+- Write findings to `phase1_initial_research.md`
+
+### Phase 2: Deep Investigation (Required)
+- Based on Phase 1, identify the most promising angles
+- Conduct 10+ additional targeted searches
+- Look for patents, academic papers, case studies, expert opinions
+- Write detailed findings to `phase2_deep_dive.md`
+
+### Phase 3: Critical Challenge (Required)
+- Re-read your findings critically
+- Search for counterarguments and potential failures
+- Identify gaps and weaknesses in your research
+- Write critical analysis to `phase3_critical_review.md`
+
+### Phase 4: Synthesis (Required)
+- Connect insights across all research
+- Develop novel conclusions with confidence ratings
+- Write synthesis to `phase4_synthesis.md`
+
+### Phase 5: Final Report (Required)
+- Compile everything into `FINAL_REPORT.md`
+
+## Critical Requirements
+
+1. You MUST conduct at least 15-20 web searches total
+2. You MUST cite sources for factual claims
+3. You MUST complete ALL phases - no shortcuts
+4. You MUST search for contradicting evidence, not just confirming evidence
+5. You MUST write each phase file before proceeding to the next
+
+Begin with Phase 1 now. Start by writing your RESEARCH_PLAN.md with research questions, then conduct your initial web searches.
 """
 
         result = await agent.ainvoke(
